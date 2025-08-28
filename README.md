@@ -13,6 +13,7 @@ Sistema de optimización de rutas logísticas usando agentes de IA con FastAPI y
 
 - Docker
 - Docker Compose
+- OpenAI API Key (para CrewAI)
 
 ## 🛠️ Instalación y Uso
 
@@ -22,12 +23,18 @@ git clone <tu-repo-url>
 cd proyecto_logista_v1
 ```
 
-2. **Ejecutar con Docker Compose**
+2. **Configurar variables de entorno**
+```bash
+cp .env.example .env
+# Editar .env y agregar tu OPENAI_API_KEY
+```
+
+3. **Ejecutar con Docker Compose**
 ```bash
 docker-compose up -d --build
 ```
 
-3. **Acceder a la aplicación**
+4. **Acceder a la aplicación**
 - Frontend: http://localhost:3000
 - Backend API: http://localhost:8000
 - Documentación API: http://localhost:8000/docs
