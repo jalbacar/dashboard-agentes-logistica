@@ -8,11 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 
 try:
-    from crewai import Agent, Task, Crew, Process
     from langchain_openai import ChatOpenAI
-    CREWAI_AVAILABLE = True
+    from langchain_ollama import ChatOllama
+    LLM_AVAILABLE = True
 except ImportError:
-    CREWAI_AVAILABLE = False
+    LLM_AVAILABLE = False
 
 def route_optimization_tool(deliveries_data: List[Dict], fleet_data: List[Dict]) -> Dict:
     """
@@ -59,36 +59,78 @@ def route_optimization_tool(deliveries_data: List[Dict], fleet_data: List[Dict])
         "unassignedDeliveries": remaining_deliveries
     }
 
-# Configurar CrewAI si está disponible
-if CREWAI_AVAILABLE:
+async def llm_optimize_routes(deliveries_data: List[Dict], fleet_data: List[Dict], llm) -> Dict:
+    """
+    Usa LLM para optimizar rutas de manera más inteligente.
+    """
+    prompt = f"""
+    Eres un experto en optimización logística. Optimiza la asignación de estas entregas a vehículos:
+
+    ENTREGAS: {json.dumps(deliveries_data)}
+    VEHÍCULOS: {json.dumps(fleet_data)}
+
+    REGLAS:
+    1. Ningún vehículo puede exceder su capacidad
+    2. Minimiza el número de vehículos usados
+    3. Distribuye eficientemente las entregas
+
+    Responde SOLO con un JSON válido con esta estructura:
+    {{
+        "optimizedRoutes": [
+            {{
+                "routeId": "RUTA-X",
+                "vehicleId": "id_vehiculo",
+                "stops": [lista_de_entregas],
+                "totalWeight": peso_total
+            }}
+        ],
+        "unassignedDeliveries": [entregas_no_asignadas]
+    }}
+    """
+    
     try:
-        llm = ChatOpenAI(
-            model="gpt-3.5-turbo",
-            temperature=0.1,
-            api_key=os.getenv("OPENAI_API_KEY", "sk-fake-key-for-demo")
-        )
-
-        logistics_coordinator = Agent(
-            role='Coordinador de Logística',
-            goal='Optimizar la asignación de entregas a vehículos para maximizar eficiencia',
-            backstory="""Eres un experto coordinador de logística con años de experiencia 
-            en optimización de rutas y gestión de flotas.""",
-            verbose=True,
-            allow_delegation=False,
-            llm=llm
-        )
-
-        route_analyst = Agent(
-            role='Analista de Rutas',
-            goal='Analizar y validar las rutas optimizadas propuestas',
-            backstory="""Eres un analista especializado en validación de rutas logísticas.""",
-            verbose=True,
-            allow_delegation=False,
-            llm=llm
-        )
+        response = await llm.ainvoke(prompt)
+        result_text = response.content if hasattr(response, 'content') else str(response)
+        
+        # Extraer JSON del texto
+        import re
+        json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group())
+        else:
+            raise ValueError("No se encontró JSON válido en la respuesta")
+            
     except Exception as e:
-        print(f"Error configurando CrewAI: {e}")
-        CREWAI_AVAILABLE = False
+        print(f"Error con LLM: {e}")
+        # Fallback al algoritmo básico - agregar marca para identificarlo
+        result = route_optimization_tool(deliveries_data, fleet_data)
+        result["_internal_fallback"] = True  # Marca interna
+        return result
+
+# Configurar LLM si está disponible
+llm = None
+if LLM_AVAILABLE:
+    try:
+        llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
+        
+        if llm_provider == "ollama":
+            ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2")
+            ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+            llm = ChatOllama(
+                model=ollama_model,
+                base_url=ollama_base_url,
+                temperature=0.1
+            )
+        else:
+            # Default a OpenAI
+            llm = ChatOpenAI(
+                model="gpt-3.5-turbo",
+                temperature=0.1,
+                api_key=os.getenv("OPENAI_API_KEY", "sk-fake-key-for-demo")
+            )
+    except Exception as e:
+        print(f"Error configurando LLM: {e}")
+        LLM_AVAILABLE = False
 
 # Modelos Pydantic
 class DeliveryItem(BaseModel):
@@ -122,9 +164,9 @@ class OptimizationRequest(BaseModel):
 
 # FastAPI App
 app = FastAPI(
-    title="CrewAI Logistics Optimization API",
-    description="API para optimización de rutas logísticas usando agentes de IA",
-    version="2.0.0"
+    title="AI Logistics Optimization API",
+    description="API para optimización de rutas logísticas usando LLM (OpenAI/Ollama)",
+    version="3.0.0"
 )
 
 app.add_middleware(
@@ -137,74 +179,56 @@ app.add_middleware(
 
 @app.post("/api/optimize-routes")
 async def optimize_routes_endpoint(request: OptimizationRequest):
-    """Optimiza rutas usando agentes de CrewAI o algoritmo básico."""
+    """Optimiza rutas usando LLM (OpenAI/Ollama) o algoritmo básico."""
     try:
         print("Iniciando optimización...")
         
         deliveries_data = [d.dict() for d in request.deliveries]
         fleet_data = [v.dict() for v in request.fleet]
         
-        if CREWAI_AVAILABLE and os.getenv("OPENAI_API_KEY") and os.getenv("OPENAI_API_KEY") != "sk-fake-key-for-demo":
+        # Verificar si podemos usar LLM
+        can_use_llm = False
+        if LLM_AVAILABLE and llm:
+            llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
+            if llm_provider == "ollama":
+                can_use_llm = True  # Ollama no necesita API key
+            elif os.getenv("OPENAI_API_KEY") and os.getenv("OPENAI_API_KEY") != "sk-fake-key-for-demo":
+                can_use_llm = True
+        
+        if can_use_llm:
             try:
-                print("Usando CrewAI para optimización...")
+                print(f"Usando LLM ({os.getenv('LLM_PROVIDER', 'openai')}) para optimización...")
+                result = await llm_optimize_routes(deliveries_data, fleet_data, llm)
                 
-                # Crear tareas
-                optimization_task = Task(
-                    description=f"""
-                    Optimiza la asignación de entregas a vehículos:
-                    
-                    Entregas: {json.dumps(deliveries_data)}
-                    Flota: {json.dumps(fleet_data)}
-                    
-                    Asegúrate de que ningún vehículo exceda su capacidad.
-                    Devuelve un JSON con rutas optimizadas.
-                    """,
-                    agent=logistics_coordinator,
-                    expected_output="JSON con rutas optimizadas y entregas no asignadas"
-                )
+                # Verificar si el resultado viene del LLM o del fallback interno
+                if result.get("_internal_fallback"):
+                    # Si llm_optimize_routes usó fallback interno
+                    result.pop("_internal_fallback", None)  # Remover marca interna
+                    result["optimization_method"] = "basic_algorithm_after_llm_error"
+                    result["llm_used"] = False
+                    result["message"] = f"LLM ({os.getenv('LLM_PROVIDER', 'openai')}) falló. Usando algoritmo básico."
+                else:
+                    # Si llm_optimize_routes devolvió resultado del LLM
+                    result["optimization_method"] = f"llm_{os.getenv('LLM_PROVIDER', 'openai')}"
+                    result["llm_used"] = True
+                    result["message"] = f"Optimización realizada con {os.getenv('LLM_PROVIDER', 'openai').upper()}"
                 
-                analysis_task = Task(
-                    description="Analiza las rutas optimizadas y valida que sean eficientes.",
-                    agent=route_analyst,
-                    expected_output="Análisis de validación de las rutas"
-                )
-                
-                # Crear y ejecutar crew
-                crew = Crew(
-                    agents=[logistics_coordinator, route_analyst],
-                    tasks=[optimization_task, analysis_task],
-                    verbose=2,
-                    process=Process.sequential
-                )
-                
-                result = crew.kickoff()
-                
-                # Intentar usar resultado de CrewAI, sino usar algoritmo básico
-                try:
-                    if hasattr(optimization_task, 'output') and optimization_task.output:
-                        crew_result = json.loads(optimization_task.output.raw)
-                        crew_result["optimization_method"] = "crewai_agents"
-                        crew_result["crewai_used"] = True
-                        crew_result["message"] = "Optimización realizada con agentes de CrewAI"
-                        crew_result["agents_used"] = ["Coordinador de Logística", "Analista de Rutas"]
-                        return crew_result
-                except Exception as parse_error:
-                    print(f"Error parseando resultado de CrewAI: {parse_error}")
-                    # Si CrewAI ejecutó pero no podemos parsear, usar algoritmo básico
-                    result = route_optimization_tool(deliveries_data, fleet_data)
-                    result["optimization_method"] = "basic_algorithm_after_crewai_error"
-                    result["crewai_used"] = False
-                    result["message"] = "CrewAI ejecutó pero hubo error en el resultado. Usando algoritmo básico."
-                    return result
+                return result
                     
             except Exception as e:
-                print(f"Error con CrewAI: {e}")
+                print(f"Error con LLM: {e}")
+                # Fallback explícito
+                result = route_optimization_tool(deliveries_data, fleet_data)
+                result["optimization_method"] = "basic_algorithm_after_llm_exception"
+                result["llm_used"] = False
+                result["message"] = f"Excepción en LLM ({os.getenv('LLM_PROVIDER', 'openai')}). Usando algoritmo básico."
+                return result
         
         # Fallback al algoritmo básico
         print("Usando algoritmo básico...")
         result = route_optimization_tool(deliveries_data, fleet_data)
         result["optimization_method"] = "basic_algorithm"
-        result["crewai_used"] = False
+        result["llm_used"] = False
         result["message"] = "Optimización realizada con algoritmo básico"
         return result
             
@@ -215,30 +239,50 @@ async def optimize_routes_endpoint(request: OptimizationRequest):
 @app.get("/")
 def read_root():
     return {
-        "message": "CrewAI Logistics API está activo",
+        "message": "AI Logistics API está activo",
         "status": "healthy",
-        "version": "2.0.0",
-        "crewai_available": CREWAI_AVAILABLE,
-        "agents": ["Coordinador de Logística", "Analista de Rutas"] if CREWAI_AVAILABLE else []
+        "version": "3.0.0",
+        "llm_available": LLM_AVAILABLE,
+        "supported_providers": ["openai", "ollama"]
     }
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "service": "crewai-logistics"}
+    return {"status": "healthy", "service": "ai-logistics"}
 
-@app.get("/crewai-status")
-def crewai_status():
-    """Verificar el estado de CrewAI y configuración."""
+@app.get("/llm-status")
+def llm_status():
+    """Verificar el estado del LLM y configuración."""
+    llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
     openai_key = os.getenv("OPENAI_API_KEY", "")
-    has_valid_key = openai_key and openai_key != "sk-fake-key-for-demo" and len(openai_key) > 10
+    has_valid_openai_key = openai_key and openai_key != "sk-fake-key-for-demo" and len(openai_key) > 10
+    
+    can_use_llm = False
+    llm_info = {}
+    
+    if LLM_AVAILABLE:
+        if llm_provider == "ollama":
+            can_use_llm = True
+            llm_info = {
+                "provider": "ollama",
+                "model": os.getenv("OLLAMA_MODEL", "llama3.2"),
+                "base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+            }
+        elif has_valid_openai_key:
+            can_use_llm = True
+            llm_info = {
+                "provider": "openai",
+                "model": "gpt-3.5-turbo"
+            }
     
     return {
-        "crewai_available": CREWAI_AVAILABLE,
-        "openai_key_configured": has_valid_key,
-        "will_use_crewai": CREWAI_AVAILABLE and has_valid_key,
-        "agents": ["Coordinador de Logística", "Analista de Rutas"] if CREWAI_AVAILABLE else [],
+        "llm_available": LLM_AVAILABLE,
+        "llm_provider": llm_provider,
+        "llm_info": llm_info,
+        "openai_key_configured": has_valid_openai_key,
+        "will_use_llm": can_use_llm,
         "fallback_method": "basic_algorithm",
-        "message": "CrewAI listo para usar" if (CREWAI_AVAILABLE and has_valid_key) else "Usando algoritmo básico"
+        "message": f"LLM listo con {llm_provider}" if can_use_llm else "Usando algoritmo básico"
     }
 
 if __name__ == "__main__":

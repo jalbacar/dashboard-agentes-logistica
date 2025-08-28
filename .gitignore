@@ -45,4 +45,28 @@ venv/
 # Temporary files
 *.tmp
 *.temp
-frontend.zip
+*.zip
+*.tar.gz
+*.rar
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Test coverage
+coverage/
+.nyc_output/
+.coverage
+htmlcov/
+
+# Cache
+.cache/
+.parcel-cache/
+.next/
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
